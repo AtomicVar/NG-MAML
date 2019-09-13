@@ -5,6 +5,7 @@ from meta_policy_search.optimizers.conjugate_gradient_optimizer import Conjugate
 import tensorflow as tf
 from collections import OrderedDict
 
+
 class TRPOMAML(MAMLAlgo):
     """
     Algorithm for TRPO MAML
@@ -20,6 +21,7 @@ class TRPOMAML(MAMLAlgo):
         num_inner_grad_steps (int) : number of gradient updates taken per maml iteration
         trainable_inner_step_size (boolean): whether make the inner step size a trainable variable
     """
+
     def __init__(
             self,
             *args,
@@ -28,7 +30,7 @@ class TRPOMAML(MAMLAlgo):
             inner_type='likelihood_ratio',
             exploration=False,
             **kwargs
-            ):
+    ):
         super(TRPOMAML, self).__init__(*args, **kwargs)
 
         assert inner_type in ["log_likelihood", "likelihood_ratio", "dice"]
@@ -38,9 +40,8 @@ class TRPOMAML(MAMLAlgo):
         self._optimization_keys = ['observations', 'actions', 'advantages', 'agent_infos']
 
         self.exploration = exploration
-        if exploration: # add adjusted average rewards tp optimization keys
+        if exploration:  # add adjusted average rewards tp optimization keys
             self._optimization_keys.append('adj_avg_rewards')
-
 
         self.optimizer = ConjugateGradientOptimizer()
 
@@ -50,7 +51,7 @@ class TRPOMAML(MAMLAlgo):
         if self.inner_type == 'likelihood_ratio':
             with tf.variable_scope("likelihood_ratio"):
                 likelihood_ratio_adapt = self.policy.distribution.likelihood_ratio_sym(action_sym,
-                                                                                       dist_info_old_sym, 
+                                                                                       dist_info_old_sym,
                                                                                        dist_info_new_sym)
             with tf.variable_scope("surrogate_loss"):
                 surr_obj_adapt = -tf.reduce_mean(likelihood_ratio_adapt * adv_sym)
@@ -92,19 +93,20 @@ class TRPOMAML(MAMLAlgo):
         for i in range(self.meta_batch_size):
             dist_info_sym = self.policy.distribution_info_sym(obs_phs[i], params=None)
             distribution_info_vars.append(dist_info_sym)  # step 0
-            current_policy_params.append(self.policy.policy_params) # set to real policy_params (tf.Variable)
+            current_policy_params.append(self.policy.policy_params)  # set to real policy_params (tf.Variable)
 
         initial_distribution_info_vars = distribution_info_vars
         initial_action_phs = action_phs
 
         with tf.variable_scope(self.name):
             """ Inner updates"""
-            for step_id in range(1, self.num_inner_grad_steps+1):
+            for step_id in range(1, self.num_inner_grad_steps + 1):
                 surr_objs, adapted_policy_params = [], []
 
                 # inner adaptation step for each task
                 for i in range(self.meta_batch_size):
-                    surr_loss = self._adapt_objective_sym(action_phs[i], adv_phs[i], dist_info_old_phs[i], distribution_info_vars[i])
+                    surr_loss = self._adapt_objective_sym(action_phs[i], adv_phs[i], dist_info_old_phs[i],
+                                                          distribution_info_vars[i])
 
                     adapted_params_var = self._adapt_sym(surr_loss, current_policy_params[i])
 
@@ -114,7 +116,8 @@ class TRPOMAML(MAMLAlgo):
                 all_surr_objs.append(surr_objs)
 
                 # Create new placeholders for the next step
-                obs_phs, action_phs, adv_phs, dist_info_old_phs, all_phs_dict = self._make_input_placeholders('step%i' % step_id)
+                obs_phs, action_phs, adv_phs, dist_info_old_phs, all_phs_dict = self._make_input_placeholders(
+                    'step%i' % step_id)
                 self.meta_op_phs_dict.update(all_phs_dict)
 
                 # dist_info_vars_for_next_step
@@ -130,17 +133,21 @@ class TRPOMAML(MAMLAlgo):
             for i in range(self.meta_batch_size):
                 likelihood_ratio = self.policy.distribution.likelihood_ratio_sym(action_phs[i], dist_info_old_phs[i],
                                                                                  distribution_info_vars[i])
-                outer_kl = tf.reduce_mean(self.policy.distribution.kl_sym(dist_info_old_phs[i], distribution_info_vars[i]))
+                outer_kl = tf.reduce_mean(
+                    self.policy.distribution.kl_sym(dist_info_old_phs[i], distribution_info_vars[i]))
 
                 surr_obj = - tf.reduce_mean(likelihood_ratio * adv_phs[i])
 
                 if self.exploration:
                     # add adj_avg_reward placeholder
-                    adj_avg_rewards = tf.placeholder(dtype=tf.float32, shape=[None], name='adj_avg_rewards' + '_' + str(self.num_inner_grad_steps) + '_' + str(i))
-                    self.meta_op_phs_dict['step%i_task%i_%s' % (self.num_inner_grad_steps, i, 'adj_avg_rewards')] = adj_avg_rewards
+                    adj_avg_rewards = tf.placeholder(dtype=tf.float32, shape=[None], name='adj_avg_rewards' + '_' + str(
+                        self.num_inner_grad_steps) + '_' + str(i))
+                    self.meta_op_phs_dict[
+                        'step%i_task%i_%s' % (self.num_inner_grad_steps, i, 'adj_avg_rewards')] = adj_avg_rewards
 
                     log_likelihood_inital = self.policy.distribution.log_likelihood_sym(initial_action_phs[i],
-                                                                                        initial_distribution_info_vars[i])
+                                                                                        initial_distribution_info_vars[
+                                                                                            i])
                     surr_obj += - tf.reduce_mean(adj_avg_rewards) * tf.reduce_mean(log_likelihood_inital)
 
                 surr_objs.append(surr_obj)

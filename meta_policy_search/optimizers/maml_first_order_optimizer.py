@@ -95,10 +95,6 @@ class MAMLFirstOrderOptimizer(Optimizer):
         sess = tf.get_default_session()
         feed_dict = self.create_feed_dict(input_val_dict)
 
-        # Overload self._batch size
-        # dataset = MAMLBatchDataset(inputs, num_batches=self._batch_size, extra_inputs=extra_inputs, meta_batch_size=self.meta_batch_size, num_grad_updates=self.num_grad_updates)
-        # Todo: reimplement minibatches
-
         loss_before_opt = None
         for epoch in range(self._max_epochs):
             if self._verbose:
@@ -107,12 +103,6 @@ class MAMLFirstOrderOptimizer(Optimizer):
             loss, _ = sess.run([self._loss, self._train_op], feed_dict)
             if not loss_before_opt: loss_before_opt = loss
 
-            # if self._verbose:
-            #     logger.log("Epoch: %d | Loss: %f" % (epoch, new_loss))
-            #
-            # if abs(last_loss - new_loss) < self._tolerance:
-            #     break
-            # last_loss = new_loss
         return loss_before_opt
 
 
@@ -163,3 +153,26 @@ class MAMLPPOOptimizer(MAMLFirstOrderOptimizer):
         feed_dict = self.create_feed_dict(input_val_dict)
         loss, inner_kl, outer_kl = sess.run([self._loss, self._inner_kl, self._outer_kl], feed_dict=feed_dict)
         return loss, inner_kl, outer_kl
+
+
+class NGMAMLOptimizer(MAMLFirstOrderOptimizer):
+    """
+    Break AdamOptimizer.minimize() into gradients by hand and apply_gradients()
+
+    """
+    def __init__(self, *args, **kwargs):
+        super(NGMAMLOptimizer, self).__init__(*args, **kwargs)
+
+    def build_graph(self, loss, grads_and_vars, input_ph_dict):
+        """
+        Sets the objective function and target weights for the optimize function
+
+        Args:
+            loss (tf.Tensor) : minimization objective
+            grads_and_vars: List of (gradient, variable) pairs
+            input_ph_dict (dict) : dict containing the placeholders of the computation graph corresponding to loss
+
+        """
+        self._loss = loss
+        self._input_ph_dict = input_ph_dict
+        self._train_op = self._tf_optimizer.apply_gradients(grads_and_vars)
