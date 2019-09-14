@@ -8,6 +8,7 @@ from meta_policy_search.optimizers.conjugate_gradient_optimizer import (
 )
 
 import tensorflow as tf
+from tensorflow.python.ops.parallel_for.gradients import jacobian
 import numpy as np
 from collections import OrderedDict
 
@@ -63,9 +64,13 @@ class NGMAML(MAMLAlgo):
 
         with tf.variable_scope(self.name):
             obs_phs, action_phs, adv_phs, dist_info_old_phs, all_phs_dict = (
-                self._make_input_placeholders()
+                self._make_input_placeholders("step0")
             )
             self.meta_op_phs_dict.update(all_phs_dict)
+
+            adapted_obs_phs, adapted_action_phs, adapted_adv_phs, adapted_dist_info_old_phs, adapted_all_phs_dict = self._make_input_placeholders(
+                'step1')
+            self.meta_op_phs_dict.update(adapted_all_phs_dict)
 
             # for later use
             old_params = self.policy.get_params()
@@ -104,26 +109,32 @@ class NGMAML(MAMLAlgo):
                 )
                 self.policy.set_params(adapted_params)
                 dist_info_adapted = self.policy.distribution_info_sym(
-                    obs_phs, params=adapted_params
+                    adapted_obs_phs, params=adapted_params
                 )
                 jrl_adapted = self._adapt_objective_sym(
-                    action_phs, adv_phs, dist_info_old_phs, dist_info_adapted
+                    adapted_action_phs, adapted_adv_phs, adapted_dist_info_old_phs, dist_info_adapted
                 )
                 grad_adapted = tf.gradients(jrl_adapted, old_params_flat)
+                self.policy.set_params(old_params)  # recover to the old params
 
                 """ calculate meta gradient """
                 hessian = tf.hessians(jlr_objective, old_params_flat)
-                jacobian_Fu = tf.reduce_mean(...)  # TODO
+                u_stop_grad = tf.stop_gradient(adapt_direction)
+                Fu = tf.matmul(fisher, u_stop_grad)
+                jacobian_Fu = jacobian(Fu, old_params_flat)
 
                 # Eq. (17)
-                meta_grad = grad_adapted - eta * tf.transpose(
-                    hessian - jacobian_Fu
-                ) * conjugate_gradients(fisher, grad_adapted)
+                meta_grad = grad_adapted - eta * tf.matmul(
+                    tf.transpose(hessian - jacobian_Fu),
+                    conjugate_gradients(fisher, grad_adapted),
+                )
 
                 meta_grads.append(meta_grad)
 
+            """ pass information to optimizer """
             meta_grad_mean = tf.reduce_mean(tf.stack(meta_grads), axis=0)
             grads_and_vars = list(zip(meta_grad_mean, old_params_flat))
+
             self.optimizer.build_graph(
                 grads_and_vars, jrl_adapted, self.meta_op_phs_dict
             )
