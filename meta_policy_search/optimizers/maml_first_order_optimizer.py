@@ -167,16 +167,17 @@ class NGMAMLOptimizer(MAMLFirstOrderOptimizer):
     def __init__(self, *args, **kwargs):
         super(NGMAMLOptimizer, self).__init__(*args, **kwargs)
 
-    def build_graph(self, grads_and_vars, input_ph_dict):
+    def build_graph(self, grads_and_vars, loss, input_ph_dict):
         """
         Sets the objective function and target weights for the optimize function
 
         Args:
             grads_and_vars: List of (gradient, variable) pairs
+            loss (tf.Tensor): meta objective
             input_ph_dict (dict) : dict containing the placeholders of the computation graph corresponding to loss
 
         """
         self._input_ph_dict = input_ph_dict
 
         self._train_op = self._tf_optimizer.apply_gradients(grads_and_vars)
-        self._loss = ...  # TODO
+        self._loss = loss

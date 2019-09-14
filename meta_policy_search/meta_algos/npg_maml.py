@@ -18,15 +18,6 @@ class NGMAML(MAMLAlgo):
 
     Args:
         policy (Policy): policy object
-        name (str): tf variable scope
-        learning_rate (float): learning rate for optimizing the meta-objective
-        num_ppo_steps (int): number of ProMP steps (without re-sampling)
-        num_minibatches (int): number of minibatches for computing the ppo gradient steps
-        clip_eps (float): PPO clip range
-        target_inner_step (float) : target inner kl divergence, used only when adaptive_inner_kl_penalty is true
-        init_inner_kl_penalty (float) : initial penalty for inner kl
-        adaptive_inner_kl_penalty (bool): whether to used a fixed or adaptive kl penalty on inner gradient update
-        anneal_factor (float) : multiplicative factor for annealing clip_eps. If anneal_factor < 1, clip_eps <- anneal_factor * clip_eps at each iteration
         inner_lr (float) : gradient step size used for inner step
         meta_batch_size (int): number of meta-learning tasks
         num_inner_grad_steps (int) : number of gradient updates taken per maml iteration
@@ -125,18 +116,17 @@ class NGMAML(MAMLAlgo):
                 jacobian_Fu = tf.reduce_mean(...)  # TODO
 
                 # Eq. (17)
-                meta_grad = -(
-                    grad_adapted
-                    - eta
-                    * tf.transpose(hessian - jacobian_Fu)
-                    * conjugate_gradients(fisher, grad_adapted)
-                )
+                meta_grad = grad_adapted - eta * tf.transpose(
+                    hessian - jacobian_Fu
+                ) * conjugate_gradients(fisher, grad_adapted)
 
                 meta_grads.append(meta_grad)
 
             meta_grad_mean = tf.reduce_mean(tf.stack(meta_grads), axis=0)
             grads_and_vars = list(zip(meta_grad_mean, old_params_flat))
-            self.optimizer.build_graph(grads_and_vars, self.meta_op_phs_dict)
+            self.optimizer.build_graph(
+                grads_and_vars, jrl_adapted, self.meta_op_phs_dict
+            )
 
     def optimize_policy(self, all_samples_data, log=True):
         """
