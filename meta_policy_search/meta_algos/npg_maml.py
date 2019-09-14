@@ -1,8 +1,10 @@
 from meta_policy_search.utils import logger
 from meta_policy_search.meta_algos.base import MAMLAlgo
 from meta_policy_search.optimizers.maml_first_order_optimizer import NGMAMLOptimizer
-from meta_policy_search.optimizers.conjugate_gradient_optimizer import conjugate_gradients, ConjugateGradientOptimizer, \
-    _flatten_params
+from meta_policy_search.optimizers.conjugate_gradient_optimizer import (
+    conjugate_gradients,
+    _flatten_params,
+)
 
 import tensorflow as tf
 import numpy as np
@@ -32,35 +34,32 @@ class NGMAML(MAMLAlgo):
     """
 
     def __init__(
-            self,
-            *args,
-            name="ng_maml",
-            learning_rate=1e-3,
-            max_epochs=1,
-            num_minibatches=1,
-            target_inner_step=0.01,
-            init_inner_kl_penalty=1e-2,
-            adaptive_inner_kl_penalty=True,
-            **kwargs
+        self, *args, name="ng_maml", learning_rate=1e-3, max_epochs=1, **kwargs
     ):
         super(NGMAML, self).__init__(*args, **kwargs)
 
-        self.optimizer = NGMAMLOptimizer(learning_rate=learning_rate, max_epochs=max_epochs,
-                                         num_minibatches=num_minibatches)
-        self.target_inner_step = target_inner_step
-        self.adaptive_inner_kl_penalty = adaptive_inner_kl_penalty
-        self.inner_kl_coeff = init_inner_kl_penalty * np.ones(self.num_inner_grad_steps)
-        self._optimization_keys = ['observations', 'actions', 'advantages', 'agent_infos']
+        self.optimizer = NGMAMLOptimizer(
+            learning_rate=learning_rate, max_epochs=max_epochs
+        )
+        self._optimization_keys = [
+            "observations",
+            "actions",
+            "advantages",
+            "agent_infos",
+        ]
         self.name = name
-        self.kl_coeff = [init_inner_kl_penalty] * self.meta_batch_size * self.num_inner_grad_steps
+        self.meta_op_phs_dict = OrderedDict()
 
         self.build_graph()
 
-    def _adapt_objective_sym(self, action_sym, adv_sym, dist_info_old_sym, dist_info_new_sym):
+    def _adapt_objective_sym(
+        self, action_sym, adv_sym, dist_info_old_sym, dist_info_new_sym
+    ):
         """ J^{LR} objective """
         with tf.variable_scope("likelihood_ratio"):
-            likelihood_ratio_adapt = self.policy.distribution.likelihood_ratio_sym(action_sym,
-                                                                                   dist_info_old_sym, dist_info_new_sym)
+            likelihood_ratio_adapt = self.policy.distribution.likelihood_ratio_sym(
+                action_sym, dist_info_old_sym, dist_info_new_sym
+            )
         with tf.variable_scope("surrogate_loss"):
             surr_obj_adapt = -tf.reduce_mean(likelihood_ratio_adapt * adv_sym)
         return surr_obj_adapt
@@ -71,25 +70,56 @@ class NGMAML(MAMLAlgo):
         """
 
         with tf.variable_scope(self.name):
-            # cg_optimizer = ConjugateGradientOptimizer()
+            # === create fisher matrix ===
+            obs_phs, action_phs, adv_phs, dist_info_old_phs, all_phs_dict = (
+                self._make_input_placeholders()
+            )
+            self.meta_op_phs_dict.update(all_phs_dict)
+            log_prob = self.policy.distribution.log_likelihood_sym(
+                obs_phs, dist_info_old_phs
+            )
+            fisher = tf.reduce_mean(tf.matmul(log_prob, tf.transpose(log_prob)))  # TODO: it is wrong!
+
+            # === create policy gradient ( \nabla J^{LR}(\theta) ) ===
+            dist_info_sym = self.policy.distribution_info_sym(obs_phs, params=None)
+            jlr_objective = self._adapt_objective_sym(
+                action_phs, adv_phs, dist_info_old_phs, dist_info_sym
+            )
+            original_params = self.policy.get_params()  # for latter use
+            policy_grad = tf.gradients(jlr_objective, _flatten_params(original_params))
+
+            # === create gradient of adapted policy ( \nabla J^{LR}(\theta') ) ===
             eta = 0.01
 
-            adapt_direction = conjugate_gradients(fisher, grad)  # Eq. (15)
-            adapted_policy_params = _flatten_params(self.policy.get_param_values()) - eta * adapt_direction  # \theta'
-            grad_adapted = ...
+            adapt_direction = conjugate_gradients(fisher, policy_grad)  # Eq. (15)
+            adapted_params = {
+                k: v - eta * adapt_direction for k, v in self.policy.get_params()
+            }
+            self.policy.set_params(adapted_params)
+            dist_info_adapted = self.policy.distribution_info_sym(
+                obs_phs, params=adapted_params
+            )
+            jrl_adapted = self._adapt_objective_sym(
+                action_phs, adv_phs, dist_info_old_phs, dist_info_adapted
+            )
+            grad_adapted = tf.gradients(
+                jrl_adapted, _flatten_params(self.policy.get_params())
+            )
+
+            # === calculate meta gradient ===
+            hessian = tf.hessians(jlr_objective, original_params)
+            jacobian_Fu = tf.reduce_mean(...)  # TODO
 
             # Eq. (17)
-            meta_grad = grad_adapted - eta * (hessian - jacobian_Fu).T * conjugate_gradients(fisher,
-                                                                                             grad_adapted)
+            meta_grad = -(
+                grad_adapted
+                - eta
+                * tf.transpose(hessian - jacobian_Fu)
+                * conjugate_gradients(fisher, grad_adapted)
+            )
 
             grads_and_vars = list(zip(meta_grad, self.policy.get_params()))
-            meta_objective = ...  # L(\theta)
-
-            self.optimizer.build_graph(
-                loss=meta_objective,
-                grads_and_vars=grads_and_vars,
-                input_ph_dict=self.meta_op_phs_dict
-            )
+            self.optimizer.build_graph(grads_and_vars, self.meta_op_phs_dict)
 
     def optimize_policy(self, all_samples_data, log=True):
         """
@@ -103,36 +133,18 @@ class NGMAML(MAMLAlgo):
         Returns:
             None
         """
-        meta_op_input_dict = self._extract_input_dict_meta_op(all_samples_data, self._optimization_keys)
-
-        if log: logger.log("Optimizing")
-        loss_before = self.optimizer.optimize(meta_op_input_dict)
-
-        if log: logger.log("Computing statistics")
-        loss_after, inner_kls, outer_kl = self.optimizer.compute_stats(meta_op_input_dict)
-
-        if self.adaptive_inner_kl_penalty:
-            if log: logger.log("Updating inner KL loss coefficients")
-            self.inner_kl_coeff = self.adapt_kl_coeff(self.inner_kl_coeff, inner_kls, self.target_inner_step)
+        meta_op_input_dict = self._extract_input_dict_meta_op(
+            all_samples_data, self._optimization_keys
+        )
 
         if log:
-            logger.logkv('LossBefore', loss_before)
-            logger.logkv('LossAfter', loss_after)
-            logger.logkv('KLInner', np.mean(inner_kls))
-            logger.logkv('KLCoeffInner', np.mean(self.inner_kl_coeff))
+            logger.log("Optimizing")
+        loss_before = self.optimizer.optimize(meta_op_input_dict)
 
-    def adapt_kl_coeff(self, kl_coeff, kl_values, kl_target):
-        if hasattr(kl_values, '__iter__'):
-            assert len(kl_coeff) == len(kl_values)
-            return np.array([_adapt_kl_coeff(kl_coeff[i], kl, kl_target) for i, kl in enumerate(kl_values)])
-        else:
-            return _adapt_kl_coeff(kl_coeff, kl_values, kl_target)
+        if log:
+            logger.log("Computing statistics")
+        loss_after = self.optimizer.loss(meta_op_input_dict)
 
-
-def _adapt_kl_coeff(kl_coeff, kl, kl_target):
-    if kl < kl_target / 1.5:
-        kl_coeff /= 2
-
-    elif kl > kl_target * 1.5:
-        kl_coeff *= 2
-    return kl_coeff
+        if log:
+            logger.logkv("LossBefore", loss_before)
+            logger.logkv("LossAfter", loss_after)

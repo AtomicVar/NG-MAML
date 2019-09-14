@@ -21,20 +21,20 @@ class MAMLFirstOrderOptimizer(Optimizer):
     """
 
     def __init__(
-            self,
-            tf_optimizer_cls=tf.train.AdamOptimizer,
-            tf_optimizer_args=None,
-            learning_rate=1e-3,
-            max_epochs=1,
-            tolerance=1e-6,
-            num_minibatches=1,
-            verbose=False
+        self,
+        tf_optimizer_cls=tf.train.AdamOptimizer,
+        tf_optimizer_args=None,
+        learning_rate=1e-3,
+        max_epochs=1,
+        tolerance=1e-6,
+        num_minibatches=1,
+        verbose=False,
     ):
 
         self._target = None
         if tf_optimizer_args is None:
             tf_optimizer_args = dict()
-        tf_optimizer_args['learning_rate'] = learning_rate
+        tf_optimizer_args["learning_rate"] = learning_rate
 
         self._tf_optimizer = tf_optimizer_cls(**tf_optimizer_args)
         self._max_epochs = max_epochs
@@ -56,7 +56,7 @@ class MAMLFirstOrderOptimizer(Optimizer):
             input_ph_dict (dict) : dict containing the placeholders of the computation graph corresponding to loss
         """
         assert isinstance(loss, tf.Tensor)
-        assert hasattr(target, 'get_params')
+        assert hasattr(target, "get_params")
         assert isinstance(input_ph_dict, dict)
 
         self._target = target
@@ -101,7 +101,8 @@ class MAMLFirstOrderOptimizer(Optimizer):
                 logger.log("Epoch %d" % epoch)
 
             loss, _ = sess.run([self._loss, self._train_op], feed_dict)
-            if not loss_before_opt: loss_before_opt = loss
+            if not loss_before_opt:
+                loss_before_opt = loss
 
         return loss_before_opt
 
@@ -151,7 +152,9 @@ class MAMLPPOOptimizer(MAMLFirstOrderOptimizer):
         """
         sess = tf.get_default_session()
         feed_dict = self.create_feed_dict(input_val_dict)
-        loss, inner_kl, outer_kl = sess.run([self._loss, self._inner_kl, self._outer_kl], feed_dict=feed_dict)
+        loss, inner_kl, outer_kl = sess.run(
+            [self._loss, self._inner_kl, self._outer_kl], feed_dict=feed_dict
+        )
         return loss, inner_kl, outer_kl
 
 
@@ -160,19 +163,20 @@ class NGMAMLOptimizer(MAMLFirstOrderOptimizer):
     Break AdamOptimizer.minimize() into gradients by hand and apply_gradients()
 
     """
+
     def __init__(self, *args, **kwargs):
         super(NGMAMLOptimizer, self).__init__(*args, **kwargs)
 
-    def build_graph(self, loss, grads_and_vars, input_ph_dict):
+    def build_graph(self, grads_and_vars, input_ph_dict):
         """
         Sets the objective function and target weights for the optimize function
 
         Args:
-            loss (tf.Tensor) : minimization objective
             grads_and_vars: List of (gradient, variable) pairs
             input_ph_dict (dict) : dict containing the placeholders of the computation graph corresponding to loss
 
         """
-        self._loss = loss
         self._input_ph_dict = input_ph_dict
+
         self._train_op = self._tf_optimizer.apply_gradients(grads_and_vars)
+        self._loss = ...  # TODO
