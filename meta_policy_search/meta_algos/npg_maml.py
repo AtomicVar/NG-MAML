@@ -4,6 +4,7 @@ from meta_policy_search.optimizers.maml_first_order_optimizer import NGMAMLOptim
 from meta_policy_search.optimizers.conjugate_gradient_optimizer import (
     conjugate_gradients,
     _flatten_params,
+    _unflatten_params,
 )
 
 import tensorflow as tf
@@ -75,26 +76,31 @@ class NGMAML(MAMLAlgo):
                 self._make_input_placeholders()
             )
             self.meta_op_phs_dict.update(all_phs_dict)
-            log_prob = self.policy.distribution.log_likelihood_sym(
-                obs_phs, dist_info_old_phs
-            )
-            fisher = tf.reduce_mean(tf.matmul(log_prob, tf.transpose(log_prob)))  # TODO: it is wrong!
+
+            for i in range(self.meta_batch_size):  # for each task
+                log_prob = self.policy.distribution.log_likelihood_sym(
+                    obs_phs[i], dist_info_old_phs[i]
+                )
+                fisher = tf.reduce_mean(
+                    tf.matmul(log_prob, tf.transpose(log_prob))
+                )  # TODO: it is wrong!
 
             # === create policy gradient ( \nabla J^{LR}(\theta) ) ===
             dist_info_sym = self.policy.distribution_info_sym(obs_phs, params=None)
             jlr_objective = self._adapt_objective_sym(
                 action_phs, adv_phs, dist_info_old_phs, dist_info_sym
             )
-            original_params = self.policy.get_params()  # for latter use
+            original_params = self.policy.get_params()  # for later use
             policy_grad = tf.gradients(jlr_objective, _flatten_params(original_params))
 
             # === create gradient of adapted policy ( \nabla J^{LR}(\theta') ) ===
             eta = 0.01
 
             adapt_direction = conjugate_gradients(fisher, policy_grad)  # Eq. (15)
-            adapted_params = {
-                k: v - eta * adapt_direction for k, v in self.policy.get_params()
-            }
+            adapted_params = _unflatten_params(
+                flat_params=_flatten_params(self.policy.get_params()) - eta * adapt_direction,
+                params_example=self.policy.get_params()
+            )
             self.policy.set_params(adapted_params)
             dist_info_adapted = self.policy.distribution_info_sym(
                 obs_phs, params=adapted_params
