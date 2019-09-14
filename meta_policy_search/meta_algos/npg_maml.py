@@ -71,60 +71,71 @@ class NGMAML(MAMLAlgo):
         """
 
         with tf.variable_scope(self.name):
-            # === create fisher matrix ===
             obs_phs, action_phs, adv_phs, dist_info_old_phs, all_phs_dict = (
                 self._make_input_placeholders()
             )
             self.meta_op_phs_dict.update(all_phs_dict)
 
+            # for later use
+            old_params = self.policy.get_params()
+            old_params_flat = _flatten_params(old_params)
+
+            meta_grads = []
             for i in range(self.meta_batch_size):  # for each task
-                log_prob = self.policy.distribution.log_likelihood_sym(
-                    obs_phs[i], dist_info_old_phs[i]
+                """ create fisher matrix """
+                log_probs = self.policy.distribution.log_likelihood_sym(
+                    action_phs[i], dist_info_old_phs[i]
+                )  # the length of log_probs is the horizon of a trajectory
+                fishers = []  # to store the "fisher matrix" for each (s, a) pair
+                for log_prob in log_probs:
+                    grad_log_prob = tf.gradients(log_prob, old_params_flat)
+                    fishers.append(
+                        tf.matmul(grad_log_prob, grad_log_prob, transpose_b=True)
+                    )
+                fisher = tf.reduce_mean(tf.stack(fishers), axis=0)
+
+                """ create policy gradient ( \nabla J^{LR}(\theta) ) """
+                dist_info_sym = self.policy.distribution_info_sym(
+                    obs_phs[i], params=None
                 )
-                fisher = tf.reduce_mean(
-                    tf.matmul(log_prob, tf.transpose(log_prob))
-                )  # TODO: it is wrong!
+                jlr_objective = self._adapt_objective_sym(
+                    action_phs[i], adv_phs[i], dist_info_old_phs[i], dist_info_sym
+                )
+                policy_grad = tf.gradients(jlr_objective, old_params_flat)
 
-            # === create policy gradient ( \nabla J^{LR}(\theta) ) ===
-            dist_info_sym = self.policy.distribution_info_sym(obs_phs, params=None)
-            jlr_objective = self._adapt_objective_sym(
-                action_phs, adv_phs, dist_info_old_phs, dist_info_sym
-            )
-            original_params = self.policy.get_params()  # for later use
-            policy_grad = tf.gradients(jlr_objective, _flatten_params(original_params))
+                """ create gradient of adapted policy ( \nabla J^{LR}(\theta') ) """
+                eta = 0.01
 
-            # === create gradient of adapted policy ( \nabla J^{LR}(\theta') ) ===
-            eta = 0.01
+                adapt_direction = conjugate_gradients(fisher, policy_grad)  # Eq. (15)
+                adapted_params = _unflatten_params(
+                    flat_params=old_params_flat - eta * adapt_direction,
+                    params_example=old_params,
+                )
+                self.policy.set_params(adapted_params)
+                dist_info_adapted = self.policy.distribution_info_sym(
+                    obs_phs, params=adapted_params
+                )
+                jrl_adapted = self._adapt_objective_sym(
+                    action_phs, adv_phs, dist_info_old_phs, dist_info_adapted
+                )
+                grad_adapted = tf.gradients(jrl_adapted, old_params_flat)
 
-            adapt_direction = conjugate_gradients(fisher, policy_grad)  # Eq. (15)
-            adapted_params = _unflatten_params(
-                flat_params=_flatten_params(self.policy.get_params()) - eta * adapt_direction,
-                params_example=self.policy.get_params()
-            )
-            self.policy.set_params(adapted_params)
-            dist_info_adapted = self.policy.distribution_info_sym(
-                obs_phs, params=adapted_params
-            )
-            jrl_adapted = self._adapt_objective_sym(
-                action_phs, adv_phs, dist_info_old_phs, dist_info_adapted
-            )
-            grad_adapted = tf.gradients(
-                jrl_adapted, _flatten_params(self.policy.get_params())
-            )
+                """ calculate meta gradient """
+                hessian = tf.hessians(jlr_objective, old_params_flat)
+                jacobian_Fu = tf.reduce_mean(...)  # TODO
 
-            # === calculate meta gradient ===
-            hessian = tf.hessians(jlr_objective, original_params)
-            jacobian_Fu = tf.reduce_mean(...)  # TODO
+                # Eq. (17)
+                meta_grad = -(
+                    grad_adapted
+                    - eta
+                    * tf.transpose(hessian - jacobian_Fu)
+                    * conjugate_gradients(fisher, grad_adapted)
+                )
 
-            # Eq. (17)
-            meta_grad = -(
-                grad_adapted
-                - eta
-                * tf.transpose(hessian - jacobian_Fu)
-                * conjugate_gradients(fisher, grad_adapted)
-            )
+                meta_grads.append(meta_grad)
 
-            grads_and_vars = list(zip(meta_grad, self.policy.get_params()))
+            meta_grad_mean = tf.reduce_mean(tf.stack(meta_grads), axis=0)
+            grads_and_vars = list(zip(meta_grad_mean, old_params_flat))
             self.optimizer.build_graph(grads_and_vars, self.meta_op_phs_dict)
 
     def optimize_policy(self, all_samples_data, log=True):
